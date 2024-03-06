@@ -1,0 +1,120 @@
+---
+name: filezilla
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/filezilla.yml
+  schedule:
+    - cron: 0 8 * * 0
+
+permissions: write-all
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    name: check trigger
+    outputs:
+      trigger: ${{ steps.check.outputs.trigger }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@main
+      - name: create manifest branch if not exist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh api /repos/${{github.repository}}/branches/${{github.workflow}} > /dev/null 2>&1; then
+          git config --global user.name gh-drive
+          git config --global user.email 148326012+gh-drive@users.noreply.github.com
+          git checkout --orphan ${{github.workflow}}
+          git rm -rf .
+          echo "empty" > version
+          git add version
+          git commit --allow-empty -m "chore: create manifest"
+          git push origin ${{github.workflow}}
+          git checkout main
+          fi
+
+      - uses: actions/checkout@main
+        name: checkout manifest
+        with:
+          ref: ${{github.workflow}}
+          path: manifest
+
+      - name: check if we need to trigger a build
+        id: check
+        run: |
+          VERSION=$(wget -q 'https://gitlab.archlinux.org/archlinux/packaging/packages/filezilla/-/raw/HEAD/PKGBUILD' -O - | grep "pkgver=" | head -1 | cut -c 8-)
+          OLD_VERSION=$(cat manifest/version)
+          if [ "$VERSION" != "$OLD_VERSION" ]; then
+          echo "trigger=true" >> "$GITHUB_OUTPUT"
+          else
+          echo "trigger=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          rm -rf manifest
+
+  upload:
+    needs: trigger
+    if: needs.trigger.outputs.trigger == 'true'
+    name: build
+    permissions: write-all
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@main
+      - name: Download
+        run: |
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}_x86_64-linux-gnu.tar.xz"
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}_i686-linux-gnu.tar.xz"
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}_win64.zip"
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}_win64-setup.exe"
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}_win32.zip"
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}_win32-setup.exe"
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}_macos-x86.app.tar.bz2"
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}_macos-arm64.app.tar.bz2"
+          curl -O "https://download.filezilla-project.org/client/FileZilla_${{ needs.trigger.outputs.version }}.sha512"
+
+      - name: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.trigger.outputs.version }}
+        run: |
+          gh release create "${VERSION}" --notes "Filezilla ${VERSION}" --title "Filezilla ${VERSION}" --repo "${{github.repository}}" || true
+          gh release upload "${VERSION}" ./FileZilla* --repo "${{github.repository}}"
+
+      - name: checkout manifest
+        uses: actions/checkout@main
+        with:
+          ref: ${{github.workflow}}
+          path: manifest
+
+      - name: update manifest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.trigger.outputs.version }}
+        run: |
+          cd manifest
+          echo "${VERSION}" > version
+          cat version
+          git config --global user.name gh-drive
+          git config --global user.email 148326012+gh-drive@users.noreply.github.com
+          git config pull.rebase false
+          git add version
+          git commit -m "chore: update version to ${VERSION}" || export NO_UPDATES=true
+          if [ "$NO_UPDATES" != "true" ]; then
+          echo "push to manifest"
+          git push --force
+          fi
+  keepalive-job:
+    name: Keepalive Workflow
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@main
+      - uses: gautamkrishnar/keepalive-workflow@v1
+        with:
+          use_api: true
